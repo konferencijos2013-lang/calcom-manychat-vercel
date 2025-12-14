@@ -1,4 +1,4 @@
-// api/webhook.js (Atnaujinta versija)
+// api/webhook.js — Cal.com → ManyChat integration (v2 API)
 export default async (req, res) => {
   if (req.method !== 'POST') {
     return res.status(405).send('Method Not Allowed');
@@ -6,59 +6,68 @@ export default async (req, res) => {
 
   const payload = req.body;
   if (!payload?.triggerEvent) {
+    console.log('❌ Missing triggerEvent in payload');
     return res.status(400).json({ error: 'Missing payload data' });
   }
 
   try {
     const eventType = payload.triggerEvent;
-    const userEmail = payload.payload.attendees?.[0]?.email;
+    const userEmail = payload.payload?.attendees?.[0]?.email;
 
-    console.log('--- START ---');
+    console.log('--- START WEBHOOK EXECUTION ---');
     console.log('📧 El. paštas:', userEmail);
-    console.log('📌 Įvykis:', eventType);
+    console.log('📌 Įvykio tipas:', eventType);
 
     if (!userEmail) {
+      console.error('❌ Nerastas el. paštas. Ignoruojama.');
       return res.status(400).json({ error: 'Missing email' });
     }
 
-    // ✅ Išvalome raktą nuo tarpų (apsauga)
+    // ✅ Išvalome API raktą nuo tarpų ir eilučių skirtukų
     const apiKey = (process.env.MANYCHAT_API_KEY || '').trim();
     if (!apiKey || apiKey.length < 20) {
       console.error('❌ ManyChat API raktas neįkeltas arba per trumpas');
       return res.status(500).json({ error: 'ManyChat API raktas neįkeltas' });
     }
 
-    if (eventType === 'BOOKING_CREATED') {
-      const meetingLink = payload.payload.metadata?.videoCallUrl || 'Bus pateikta vėliau';
-      const bookingDate = new Date(payload.payload.startTime);
-      const bookingTimeFormatted = bookingDate.toLocaleDateString('lt-LT', {
-        year: 'numeric', month: 'long', day: 'numeric',
-        hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Vilnius'
-      });
+    // 💡 Nustatome laiko formatą lietuviškai
+    const bookingDate = new Date(payload.payload.startTime);
+    const bookingTimeFormatted = bookingDate.toLocaleDateString('lt-LT', {
+      year: 'numeric', month: 'long', day: 'numeric',
+      hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Vilnius'
+    });
 
+    // 🔗 Google Meet nuoroda (jei yra)
+    const meetingLink = payload.payload.metadata?.videoCallUrl || 'Bus pateikta vėliau';
+
+    // 🔄 Siunčiame duomenis į ManyChat
+    if (eventType === 'BOOKING_CREATED') {
       await sendManyChatUpdate(userEmail, 'Google_Meet_Nuoroda', meetingLink, apiKey);
       await sendManyChatUpdate(userEmail, 'Konsultacijos_Statusas', 'PATVIRTINTA', apiKey);
       await sendManyChatUpdate(userEmail, 'Rezervacijos_Data_Laikas_text', bookingTimeFormatted, apiKey);
 
-      return res.status(200).json({ success: true, message: 'Duomenys išsiųsti į ManyChat' });
+      console.log('✅ Rezervacija patvirtinta, duomenys išsiųsti į ManyChat');
+      return res.status(200).json({ success: true, message: 'Duomenys sėkmingai išsiųsti' });
 
     } else if (eventType === 'BOOKING_CANCELLED') {
       await sendManyChatUpdate(userEmail, 'Konsultacijos_Statusas', 'ATSAUKTA', apiKey);
+      console.log('✅ Rezervacija atšaukta, statusas atnaujintas');
       return res.status(200).json({ success: true, message: 'Statusas atnaujintas' });
     }
 
-    return res.status(200).json({ success: true, message: `Ignoruojama: ${eventType}` });
+    console.log(`⚠️ Ignoruojamas įvykis: ${eventType}`);
+    return res.status(200).json({ success: true, message: `Ignoruojamas: ${eventType}` });
 
   } catch (error) {
-    console.error('💥 Klaida:', error.message);
-    return res.status(500).json({ error: 'Vidaus klaida' });
+    console.error('💥 Klaida apdorojant webhook:', error.message);
+    return res.status(500).json({ error: 'Server error during processing' });
   }
 };
 
-// ✅ NAUJAS ManyChat v2 API
+// ✅ ManyChat v2 API funkcija — naudojanti updateProfile
 async function sendManyChatUpdate(externalId, fieldName, fieldValue, apiKey) {
   const url = 'https://api.manychat.com/v2/subscriber/updateProfile';
-  
+
   const payload = JSON.stringify({
     external_id: externalId,
     custom_fields: {
@@ -85,6 +94,6 @@ async function sendManyChatUpdate(externalId, fieldName, fieldValue, apiKey) {
     }
 
   } catch (e) {
-    console.error('💥 Siuntimo klaida:', e.message);
+    console.error(`💥 Klaida siunčiant į ManyChat (laukas: ${fieldName}):`, e.message);
   }
 }
