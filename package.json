@@ -1,0 +1,20 @@
+{
+  "name": "calcom-manychat-vercel",
+  "version": "1.0.0",
+  "description": "Cal.com Webhook processor for ManyChat via Vercel Serverless Function",
+  "main": "api/webhook.js",
+  "type": "module",
+  "dependencies": {
+    "node-fetch": "^3.3.0"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "vercel",
+    "webhook",
+    "manychat"
+  ],
+  "author": "Jūsų vardas",
+  "license": "ISC"
+}
