@@ -1,99 +1,112 @@
-// api/webhook.js — Cal.com → ManyChat integration (v2 API)
+// api/webhook.js
+import fetch from 'node-fetch';
+
+// Nurodome ManyChat API V2 URL kontaktų atnaujinimui
+const MANYCHAT_API_URL = 'https://api.manychat.com/api/v2/contacts';
+
+/**
+ * Pagrindinė Webhook funkcija, apdorojanti Cal.com įvykius
+ */
 export default async (req, res) => {
-  if (req.method !== 'POST') {
-    return res.status(405).send('Method Not Allowed');
-  }
-
-  const payload = req.body;
-  if (!payload?.triggerEvent) {
-    console.log('❌ Missing triggerEvent in payload');
-    return res.status(400).json({ error: 'Missing payload data' });
-  }
-
-  try {
-    const eventType = payload.triggerEvent;
-    const userEmail = payload.payload?.attendees?.[0]?.email;
-
-    console.log('--- START WEBHOOK EXECUTION ---');
-    console.log('📧 El. paštas:', userEmail);
-    console.log('📌 Įvykio tipas:', eventType);
-
-    if (!userEmail) {
-      console.error('❌ Nerastas el. paštas. Ignoruojama.');
-      return res.status(400).json({ error: 'Missing email' });
+    // Tikriname, ar užklausa yra POST
+    if (req.method !== 'POST') {
+        return res.status(405).json({ message: 'Tik POST užklausos priimamos' });
     }
 
-    // ✅ Išvalome API raktą nuo tarpų ir eilučių skirtukų
-    const apiKey = (process.env.MANYCHAT_API_KEY || '').trim();
-    if (!apiKey || apiKey.length < 20) {
-      console.error('❌ ManyChat API raktas neįkeltas arba per trumpas');
-      return res.status(500).json({ error: 'ManyChat API raktas neįkeltas' });
+    const {
+        event,
+        payload
+    } = req.body;
+
+    if (!payload || !event) {
+        return res.status(400).json({ message: 'Trūksta Cal.com įvykio duomenų' });
     }
 
-    // 💡 Nustatome laiko formatą lietuviškai
-    const bookingDate = new Date(payload.payload.startTime);
-    const bookingTimeFormatted = bookingDate.toLocaleDateString('lt-LT', {
-      year: 'numeric', month: 'long', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Vilnius'
-    });
+    const externalId = payload.attendees[0]?.email; // Naudojame el. paštą kaip External ID
+    const meetingLink = payload.location;
+    const bookingTime = payload.startTime; 
+    const bookingStatus = "Patvirtinta"; 
 
-    // 🔗 Google Meet nuoroda (jei yra)
-    const meetingLink = payload.payload.metadata?.videoCallUrl || 'Bus pateikta vėliau';
+    // Paimame API raktą iš Vercel aplinkos kintamųjų
+    const MANYCHAT_API_KEY = process.env.MANYCHAT_API_KEY;
 
-    // 🔄 Siunčiame duomenis į ManyChat
-    if (eventType === 'BOOKING_CREATED') {
-      await sendManyChatUpdate(userEmail, 'Google_Meet_Nuoroda', meetingLink, apiKey);
-      await sendManyChatUpdate(userEmail, 'Konsultacijos_Statusas', 'PATVIRTINTA', apiKey);
-      await sendManyChatUpdate(userEmail, 'Rezervacijos_Data_Laikas_text', bookingTimeFormatted, apiKey);
-
-      console.log('✅ Rezervacija patvirtinta, duomenys išsiųsti į ManyChat');
-      return res.status(200).json({ success: true, message: 'Duomenys sėkmingai išsiųsti' });
-
-    } else if (eventType === 'BOOKING_CANCELLED') {
-      await sendManyChatUpdate(userEmail, 'Konsultacijos_Statusas', 'ATSAUKTA', apiKey);
-      console.log('✅ Rezervacija atšaukta, statusas atnaujintas');
-      return res.status(200).json({ success: true, message: 'Statusas atnaujintas' });
+    if (!MANYCHAT_API_KEY) {
+        console.error('KLAIDA: Trūksta MANYCHAT_API_KEY aplinkos kintamojo.');
+        return res.status(500).json({ message: 'Serverio klaida: Trūksta API rakto.' });
     }
 
-    console.log(`⚠️ Ignoruojamas įvykis: ${eventType}`);
-    return res.status(200).json({ success: true, message: `Ignoruojamas: ${eventType}` });
+    console.log(`--- START VERCEL EXECUTION ---`);
+    console.log(`Ištrauktas el. paštas (External ID): ${externalId}`);
+    console.log(`Įvykio tipas: ${event}`);
 
-  } catch (error) {
-    console.error('💥 Klaida apdorojant webhook:', error.message);
-    return res.status(500).json({ error: 'Server error during processing' });
-  }
+    if (event === 'BOOKING_CREATED') {
+        const updates = [
+            { fieldName: 'Google_Meet_Nuoroda', fieldValue: meetingLink },
+            { fieldName: 'Konsultacijos_Statusas', fieldValue: bookingStatus },
+            { fieldName: 'Rezervacijos_Data_Laikas_text', fieldValue: bookingTime }
+        ];
+
+        let success = true;
+        for (const update of updates) {
+            const result = await sendManyChatUpdate(externalId, update.fieldName, update.fieldValue, MANYCHAT_API_KEY);
+            if (!result) {
+                success = false;
+            }
+        }
+
+        if (success) {
+            console.log('--- Visi laukai SĖKMINGAI ATNAUJINTI MANYCHAT ---');
+            return res.status(200).json({ message: 'Sėkmė: ManyChat laukai atnaujinti.' });
+        } else {
+            console.error('--- KLAIDA: NEPAVYKO ATNAUJINTI VISŲ LAUKŲ MANYCHAT ---');
+            // Grąžiname 200, kad Cal.com negautų klaidos, bet registruojame problemą
+            return res.status(200).json({ message: 'Įvykdytas su klaidomis (žr. žurnalus).' });
+        }
+    }
+
+    return res.status(200).json({ message: 'Įvykis apdorotas (bet neatitinka BOOKING_CREATED).' });
 };
 
-// ✅ ManyChat v2 API funkcija — naudojanti updateProfile
+/**
+ * Pagalbinė funkcija siųsti duomenis į ManyChat V2 API
+ */
 async function sendManyChatUpdate(externalId, fieldName, fieldValue, apiKey) {
-  const url = 'https://api.manychat.com/v2/subscriber/updateProfile';
+    // --- API Rakto apdorojimas (kritinis) ---
+    // Naudojame tik API raktą be Page ID ar dvitaškio
+    let bearerToken = apiKey.includes(':') ? apiKey.split(':')[1] : apiKey;
+    // ----------------------------------------
 
-  const payload = JSON.stringify({
-    external_id: externalId,
-    custom_fields: {
-      [fieldName]: fieldValue
-    }
-  });
-
-  try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json'
-      },
-      body: payload
+    const payload = JSON.stringify({
+        external_id: externalId,
+        custom_fields: [{
+            name: fieldName,
+            value: fieldValue
+        }]
     });
 
-    const result = await response.json();
+    try {
+        const response = await fetch(MANYCHAT_API_URL, {
+            method: 'POST',
+            headers: {
+                // ManyChat V2 naudoja Bearer Token
+                'Authorization': `Bearer ${bearerToken}`,
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            },
+            body: payload
+        });
 
-    if (!response.ok) {
-      console.error(`❌ ManyChat klaida (${response.status}) | Laukas: ${fieldName} |`, result);
-    } else {
-      console.log(`✅ ManyChat sėkmė | Laukas: ${fieldName}`);
+        const data = await response.json();
+
+        if (response.ok) {
+            console.log(`ManyChat SĖKMĖ: Laukas ${fieldName} atnaujintas.`);
+            return true;
+        } else {
+            console.error(`ManyChat KLAIDA (HTTP ${response.status} / Laukas: ${fieldName}): ${JSON.stringify(data)}`);
+            return false;
+        }
+    } catch (e) {
+        console.error('Bendroji klaida siunčiant į ManyChat:', e);
+        return false;
     }
-
-  } catch (e) {
-    console.error(`💥 Klaida siunčiant į ManyChat (laukas: ${fieldName}):`, e.message);
-  }
 }
